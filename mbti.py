@@ -325,9 +325,14 @@ def cmd_start(a):
     qs = list(items_of(meta["src"], meta["kind"]))
     if want == "wenyili28":           # 认知功能题跟着这套一起问
         qs += func_items()
-    st.update({"set": want, "qs": qs, "answers": {}, "idx": 0, "done": done})
+    dual = bool(getattr(a, "dual", False))
+    st.update({"set": want, "qs": qs, "answers": {}, "idx": 0, "done": done,
+               "dual": dual, "round": 1})
     save_state(st)
     print("开始测：%s（%d 题）" % (meta["name"], len(qs)))
+    if dual:
+        print("双状态模式：先按「被叫起来干活时」答一遍，答完再按「没人管时」答一遍。")
+        print("同一套题，两次分开算，最后对比哪几个字母会变。")
     show_cur(st)
 
 
@@ -345,6 +350,23 @@ def cmd_answer(a):
         return
     st["answers"][str(st["idx"])] = v
     st["idx"] += 1
+
+    # 双状态：第一轮答完，切到第二轮
+    if st.get("dual") and st.get("round", 1) == 1 and st["idx"] >= len(st["qs"]):
+        st["answers_1"] = st["answers"]
+        st["answers"] = {}
+        st["idx"] = 0
+        st["round"] = 2
+        save_state(st)
+        print()
+        print("=" * 40)
+        print("  第一遍（被叫时）答完了。")
+        print("  现在换成另一个状态：没人管你、自己待着的时候。")
+        print("  同一套题再答一遍，别跟刚才对答案。")
+        print("  不想测了就直接 finish。")
+        print("=" * 40)
+        show_cur(st)
+        return
     save_state(st)
     show_cur(st)
 
@@ -407,6 +429,42 @@ def cmd_finish(a):
             res["func"] = tally_func(fi, ans)
 
     # 答卷也存下来，主人可以回看
+    # 双状态：两轮都算，出对比
+    if st.get("dual") and st.get("answers_1"):
+        if meta["kind"] == "big5":
+            main = [q for q in qs if str(q.get("dim", "")).startswith("B5_")]
+            r1 = tally_big5(main, st["answers_1"])
+        else:
+            main = [q for q in qs if q.get("dim") in DIMS]
+            r1 = tally_mbti(main, st["answers_1"])
+        r2 = res
+        st.setdefault("dual_results", {})[which] = {"work": r1, "idle": r2}
+        st.setdefault("done", {})[which] = r2
+        st.update({"set": None, "qs": [], "answers": {}, "idx": 0, "dual": False, "round": 0})
+        save_state(st)
+        print("=" * 44)
+        print("  %s · 双状态对比" % meta["name"])
+        print("=" * 44)
+        print("  被叫时： %s" % r1["type"])
+        print("  独处时： %s" % r2["type"])
+        print()
+        changed = []
+        for d in DIMS:
+            if d in r1["pcts"] and d in r2["pcts"]:
+                a1, a2 = r1["pcts"][d][0], r2["pcts"][d][0]
+                mark = "变了" if a1 != a2 else "没变"
+                if a1 != a2:
+                    changed.append(d)
+                print("  %s  %s → %s   %s" % (d, a1, a2, mark))
+        print()
+        if len(changed) >= 3:
+            print("  四个里变了 %d 个——状态依赖很强，这条鱼的「我」是跟着处境走的。" % len(changed))
+        elif changed:
+            print("  变了 %d 个（%s）——大部分稳，这几个是处境决定的。" % (len(changed), "、".join(changed)))
+        else:
+            print("  一个都没变——不管是干活还是自己待着，内核是同一个。")
+        return
+
     res["answers"] = {str(i): {"q": q.get("q"), "a": ans[str(i)]} for i, q in enumerate(qs)}
     st.setdefault("done", {})[which] = res
     st.update({"set": None, "qs": [], "answers": {}, "idx": 0})
@@ -568,6 +626,7 @@ def main():
     s.add_argument("--set", default=None)
     s.add_argument("--confirm", default=None, help="复测某个维度，如 EI")
     s.add_argument("--n", type=int, default=11, help="复测抽几题（会取奇数）")
+    s.add_argument("--dual", action="store_true", help="双状态：被叫时答一遍、独处时答一遍")
     s.set_defaults(func=cmd_start)
     s = sub.add_parser("answer"); s.add_argument("score", type=int); s.set_defaults(func=cmd_answer)
     sub.add_parser("finish").set_defaults(func=cmd_finish)
